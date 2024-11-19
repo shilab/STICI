@@ -1,29 +1,38 @@
-import os, sys, shutil, gzip, argparse, math
+'''
+Sample calls:
+python3 STICI_V1.1.py --mode train --which-chunk 1 --save-dir ./alaki --ref ./data/STI_benchmark_datasets/ALL.chr22.training.samples.100k.any.type.0.01.maf.variants.vcf.gz --min-mr 0.85 --max-mr 0.95 --cs 2048 --sites-per-model 10240 --co 64 --na-heads 16 --embed-dim 128 --batch-size-per-gpu 4 --tihp 1 --lr 0.002 --restart-training 1 --verbose 1
+python3 STICI_V1.1.py --save-dir ./alaki --ref ./data/test_purpose_datasets/Chr22_Dels_train_fold_1.vcf --min-mr 0.8 --max-mr 0.8 --na-heads 16 --embed-dim 128 --batch-size-per-gpu 4 --tihp 1 --verbose 1 --cs 2048 --co 64 --sites-per-model 10240 --lr 0.002 --restart-training 1
+python3 STICI_V1.1.py --save-dir ./alaki --ref ./data/test_purpose_datasets/Chr22_SVs_train_fold_1.vcf --min-mr 0.8 --max-mr 0.8 --na-heads 16 --embed-dim 128 --batch-size-per-gpu 4 --tihp 1 --verbose 1 --cs 2048 --co 64 --sites-per-model 10240 --lr 0.002 --restart-training 1
+'''
+
+import argparse
+import datatable as dt
+import gzip
+import json
 import logging
-# from icecream import ic
-from tqdm import tqdm
+import math
 import numpy as np
-from typing import Union
+import os
 import pandas as pd
-from scipy.special import softmax
-from sklearn.model_selection import train_test_split
+import psutil
+import shutil
+import sys
 import tensorflow as tf
-from tensorflow import keras
 import tensorflow.keras.backend as K
-from tensorflow.keras import layers
-from tensorflow.keras import regularizers
 import tensorflow_addons as tfa
+from joblib import Parallel, delayed
 from sklearn import metrics
-from tensorflow.keras.utils import to_categorical
+from sklearn.model_selection import train_test_split
+from tensorflow import keras
 from tensorflow.keras import constraints
 from tensorflow.keras import initializers
-from tensorflow.keras.applications import efficientnet as efn
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import f1_score
-from tensorflow.keras.constraints import Constraint
-from scipy.spatial.distance import squareform
-import datatable as dt
-import json
+from tensorflow.keras import layers
+from tensorflow.keras import regularizers
+from tensorflow.python.saved_model import signature_constants
+from tensorflow.python.saved_model import tag_constants
+# from icecream import ic
+from tqdm import tqdm
+from typing import Union
 
 
 class bcolors:
@@ -49,12 +58,55 @@ SUPPORTED_FILE_FORMATS = {"vcf", "csv", "tsv"}
 keras.saving.get_custom_objects().clear()
 
 
-## Custom Layers
+@keras.saving.register_keras_serializable(package="MyLayers")
+class TransformerBlock(layers.Layer):
+    def __init__(self, embed_dim, num_heads, ff_dim, method='linear',
+                 dropout_rate=0.0, start_offset=0, end_offset=0):
+        super(TransformerBlock, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.method = method
+        self.start_offset = start_offset
+        self.end_offset = end_offset
+        self.ffn = keras.Sequential(
+            [layers.Dense(ff_dim, activation=tf.nn.gelu),
+             layers.Dense(embed_dim, activation=tf.nn.gelu), ]
+        )
+        self.layernorm1 = layers.LayerNormalization(epsilon=1e-6)
+        self.layernorm2 = layers.LayerNormalization(epsilon=1e-6)
+        self.att = layers.MultiHeadAttention(num_heads=self.num_heads,
+                                             key_dim=self.embed_dim,
+                                             dropout=dropout_rate)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                "embed_dim": self.embed_dim,
+                "num_heads": self.num_heads,
+                "method": self.method,
+                "start_offset": self.start_offset,
+                "end_offset": self.end_offset,
+                "ffn": self.ffn,
+                "att": self.att,
+                "layernorm1": self.layernorm1,
+                "layernorm2": self.layernorm2,
+            }
+        )
+        return config
+
+    def call(self, x, training=False):
+        attn_output = self.att(x[0][:, self.start_offset:x[0].shape[1] - self.end_offset, :], x[1], training=training)
+        out1 = self.layernorm1(x[0][:, self.start_offset:x[0].shape[1] - self.end_offset, :] + attn_output)
+        ffn_output = self.ffn(out1)
+        return self.layernorm2(out1 + ffn_output)
+
+
 @keras.saving.register_keras_serializable(package="MyLayers")
 class CrossAttentionLayer(layers.Layer):
     def __init__(self, local_dim, global_dim,
                  start_offset=0, end_offset=0,
-                 activation=tf.nn.gelu, dropout_rate=0.1,
+                 activation=tf.nn.gelu, dropout_rate=0.0,
                  n_heads=8, **kwargs):
         super(CrossAttentionLayer, self).__init__(**kwargs)
         self.local_dim = local_dim
@@ -103,27 +155,7 @@ class CrossAttentionLayer(layers.Layer):
         )
         return config
 
-    # @classmethod
-    # def from_config(cls, config):
-    #     # Note that you can also use `keras.saving.deserialize_keras_object` here
-    #     config["local_dim"] = keras.layers.deserialize(config["local_dim"])
-    #     config["global_dim"] = keras.layers.deserialize(config["global_dim"])
-    #     config["start_offset"] = keras.layers.deserialize(config["start_offset"])
-    #     config["end_offset"] = keras.layers.deserialize(config["end_offset"])
-    #     config["activation"] = keras.layers.deserialize(config["activation"])
-    #     config["dropout_rate"] = keras.layers.deserialize(config["dropout_rate"])
-    #     config["n_heads"] = keras.layers.deserialize(config["n_heads"])
-
-    #     config["layer_norm00"] = keras.layers.deserialize(config["layer_norm00"])
-    #     config["layer_norm01"] = keras.layers.deserialize(config["layer_norm01"])
-    #     config["layer_norm1"] = keras.layers.deserialize(config["layer_norm1"])
-    #     config["ffn"] = keras.layers.deserialize(config["ffn"])
-    #     config["add0"] = keras.layers.deserialize(config["add0"])
-    #     config["add1"] = keras.layers.deserialize(config["add1"])
-    #     config["attention"] = keras.layers.deserialize(config["attention"])
-    #     return cls(**config)
-
-    def call(self, inputs, training):
+    def call(self, inputs, training=False):
         local_repr = self.layer_norm00(inputs[0])
         global_repr = self.layer_norm01(inputs[1])
         query = local_repr[:, self.start_offset:local_repr.shape[1] - self.end_offset, :]
@@ -132,7 +164,7 @@ class CrossAttentionLayer(layers.Layer):
 
         # Generate cross-attention outputs: [batch_size, latent_dim, projection_dim].
         attention_output = self.attention(
-            query, key, value
+            query, key, value, training=training
         )
         # Skip connection 1.
         attention_output = self.add0([attention_output, query])
@@ -144,95 +176,6 @@ class CrossAttentionLayer(layers.Layer):
         # Skip connection 2.
         outputs = self.add1([outputs, attention_output])
         return outputs
-
-
-@keras.saving.register_keras_serializable(package="MyLayers")
-class MaskedTransformerBlock(layers.Layer):
-    def __init__(self, embed_dim, num_heads, ff_dim, attention_range, start_offset=0, end_offset=0,
-                 attn_block_repeats=1, activation=tf.nn.gelu, dropout_rate=0.1, use_ffn=True, **kwargs):
-        super(MaskedTransformerBlock, self).__init__(**kwargs)
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.ff_dim = ff_dim
-        self.start_offset = start_offset
-        self.end_offset = end_offset
-        self.attention_range = attention_range
-        self.attn_block_repeats = attn_block_repeats
-        self.activation = activation
-        self.dropout_rate = dropout_rate
-        self.use_ffn = use_ffn
-        self.att0 = layers.MultiHeadAttention(num_heads=self.num_heads,
-                                              key_dim=self.embed_dim)
-        if self.use_ffn:
-            self.ffn = tf.keras.Sequential(
-                [
-                    layers.Dense(self.ff_dim, activation=self.activation,
-                                 ),
-                    layers.Dense(self.embed_dim,
-                                 activation=self.activation,
-                                 ), ]
-            )
-        self.layer_norm0 = layers.LayerNormalization()
-        self.layer_norm1 = layers.LayerNormalization()
-
-    def get_config(self):
-        config = super().get_config()
-        config.update(
-            {
-                "embed_dim": self.embed_dim,
-                "num_heads": self.num_heads,
-                "ff_dim": self.ff_dim,
-                "attention_range": self.attention_range,
-                "start_offset": self.start_offset,
-                "end_offset": self.end_offset,
-                "attn_block_repeats": self.attn_block_repeats,
-                "activation": self.activation,
-                "dropout_rate": self.dropout_rate,
-                "use_ffn": self.use_ffn,
-
-                "ffn": self.ffn,
-                "att0": self.att0,
-                "layer_norm0": self.layer_norm0,
-                "layer_norm1": self.layer_norm1,
-            }
-        )
-        return config
-
-    # @classmethod
-    # def from_config(cls, config):
-    #     # Note that you can also use `keras.saving.deserialize_keras_object` here
-    #     config["embed_dim"] = keras.layers.deserialize(config["embed_dim"])
-    #     config["num_heads"] = keras.layers.deserialize(config["num_heads"])
-    #     config["ff_dim"] = keras.layers.deserialize(config["ff_dim"])
-    #     config["attention_range"] = keras.layers.deserialize(config["attention_range"])
-    #     config["start_offset"] = keras.layers.deserialize(config["start_offset"])
-    #     config["end_offset"] = keras.layers.deserialize(config["end_offset"])
-    #     config["attn_block_repeats"] = keras.layers.deserialize(config["attn_block_repeats"])
-    #     config["activation"] = keras.layers.deserialize(config["activation"])
-    #     config["dropout_rate"] = keras.layers.deserialize(config["dropout_rate"])
-    #     config["use_ffn"] = keras.layers.deserialize(config["use_ffn"])
-
-    #     config["feature_size"] = keras.layers.deserialize(config["feature_size"])
-    #     config["attention_mask"] = keras.layers.deserialize(config["attention_mask"])
-
-    #     config["ffn"] = keras.layers.deserialize(config["ffn"])
-    #     config["att0"] = keras.layers.deserialize(config["att0"])
-    #     config["layer_norm0"] = keras.layers.deserialize(config["layer_norm0"])
-    #     config["layer_norm1"] = keras.layers.deserialize(config["layer_norm1"])
-    #     return cls(**config)
-
-    def call(self, inputs, training):
-        x = self.layer_norm0(inputs)
-        attn_output = self.att0(x[:, self.start_offset:x.shape[1] - self.end_offset, :], x,
-                                )
-        out1 = x[:, self.start_offset:x.shape[1] - self.end_offset, :] + attn_output
-        out1 = self.layer_norm1(out1)
-        if self.use_ffn:
-            ffn_output = self.ffn(out1)
-            x = out1 + ffn_output
-        else:
-            x = out1
-        return x
 
 
 @keras.saving.register_keras_serializable(package="MyLayers")
@@ -286,138 +229,9 @@ class CatEmbeddings(layers.Layer):
         )
         return config
 
-    # @classmethod
-    # def from_config(cls, config):
-    #     # Note that you can also use `keras.saving.deserialize_keras_object` here
-    #     config["embedding_dim"] = keras.layers.deserialize(config["embedding_dim"])
-    #     config["embeddings_initializer"] = keras.layers.deserialize(config["embeddings_initializer"])
-    #     config["embeddings_regularizer"] = keras.layers.deserialize(config["embeddings_regularizer"])
-    #     config["activity_regularizer"] = keras.layers.deserialize(config["activity_regularizer"])
-    #     config["embeddings_constraint"] = keras.layers.deserialize(config["embeddings_constraint"])
-    #     config["position_embedding"] = keras.layers.deserialize(config["position_embedding"])
-    #     config["num_of_allels"] = keras.layers.deserialize(config["num_of_allels"])
-    #     config["n_snps"] = keras.layers.deserialize(config["n_snps"])
-    #     # config["embedding"] = keras.layers.deserialize(config["embedding"])
-    #     config["positions"] = keras.layers.deserialize(config["positions"])
-    #     return cls(**config)
-
     def call(self, inputs):
         self.immediate_result = tf.einsum('ijk,kl->ijl', inputs, self.embedding)
         return self.immediate_result + self.position_embedding(self.positions)
-
-
-@keras.saving.register_keras_serializable(package="MyLayers")
-class SelfAttnChunk(layers.Layer):
-    def __init__(self, embed_dim, num_heads, ff_dim, attention_range,
-                 start_offset=0, end_offset=0,
-                 attn_block_repeats=1,
-                 include_embedding_layer=False, **kwargs):
-        super(SelfAttnChunk, self).__init__(**kwargs)
-        self.attention_range = attention_range
-        self.start_offset = start_offset
-        self.end_offset = end_offset
-        self.ff_dim = ff_dim
-        self.num_heads = num_heads
-        self.embed_dim = embed_dim
-        self.attn_block_repeats = attn_block_repeats
-        self.include_embedding_layer = include_embedding_layer
-
-        self.attention_block = MaskedTransformerBlock(self.embed_dim,
-                                                      self.num_heads, self.ff_dim,
-                                                      attention_range, start_offset,
-                                                      end_offset, attn_block_repeats=1)
-        # if include_embedding_layer:
-        #     self.embedding = GenoEmbeddings(embed_dim)
-
-    def get_config(self):
-        config = super().get_config()
-        config.update(
-            {
-                "embed_dim": self.embed_dim,
-                "num_heads": self.num_heads,
-                "ff_dim": self.ff_dim,
-                "attention_range": self.attention_range,
-                "start_offset": self.start_offset,
-                "end_offset": self.end_offset,
-                "attn_block_repeats": self.attn_block_repeats,
-                "include_embedding_layer": self.include_embedding_layer,
-
-                "attention_block": self.attention_block,
-            }
-        )
-        return config
-
-    # @classmethod
-    # def from_config(cls, config):
-    #     # Note that you can also use `keras.saving.deserialize_keras_object` here
-    #     config["embed_dim"] = keras.layers.deserialize(config["embed_dim"])
-    #     config["num_heads"] = keras.layers.deserialize(config["num_heads"])
-    #     config["ff_dim"] = keras.layers.deserialize(config["ff_dim"])
-    #     config["attention_range"] = keras.layers.deserialize(config["attention_range"])
-    #     config["start_offset"] = keras.layers.deserialize(config["start_offset"])
-    #     config["end_offset"] = keras.layers.deserialize(config["end_offset"])
-    #     config["attn_block_repeats"] = keras.layers.deserialize(config["attn_block_repeats"])
-    #     config["include_embedding_layer"] = keras.layers.deserialize(config["include_embedding_layer"])
-
-    #     config["attention_block"] = keras.layers.deserialize(config["attention_block"])
-    #     return cls(**config)
-
-    def call(self, inputs, training):
-        # if self.include_embedding_layer:
-        #     x = self.embedding(inputs)
-        # else:
-        x = inputs
-        x = self.attention_block(x)
-        return x
-
-
-@keras.saving.register_keras_serializable(package="MyLayers")
-class CrossAttnChunk(layers.Layer):
-    def __init__(self, start_offset=0, end_offset=0, n_heads=8, **kwargs):
-        super(CrossAttnChunk, self).__init__(**kwargs)
-        self.start_offset = start_offset
-        self.end_offset = end_offset
-        self.n_heads = n_heads
-
-    def build(self, input_shape):
-        self.local_dim = input_shape[0][-1]
-        self.global_dim = input_shape[1][-1]
-        self.attention_block = CrossAttentionLayer(self.local_dim, self.global_dim,
-                                                   self.start_offset, self.end_offset,
-                                                   n_heads=self.n_heads)
-        pass
-
-    def get_config(self):
-        config = super().get_config()
-        config.update(
-            {
-                "start_offset": self.start_offset,
-                "end_offset": self.end_offset,
-                "n_heads": self.n_heads,
-                "local_dim": self.local_dim,
-                "global_dim": self.global_dim,
-
-                "attention_block": self.attention_block,
-            }
-        )
-        return config
-
-    # @classmethod
-    # def from_config(cls, config):
-    #     # Note that you can also use `keras.saving.deserialize_keras_object` here
-    #     config["start_offset"] = keras.layers.deserialize(config["start_offset"])
-    #     config["end_offset"] = keras.layers.deserialize(config["end_offset"])
-    #     config["n_heads"] = keras.layers.deserialize(config["n_heads"])
-    #     config["local_dim"] = keras.layers.deserialize(config["local_dim"])
-    #     config["global_dim"] = keras.layers.deserialize(config["global_dim"])
-
-    #     config["attention_block"] = keras.layers.deserialize(config["attention_block"])
-    #     return cls(**config)
-
-    def call(self, inputs, training):
-        x = inputs
-        x = self.attention_block(x)
-        return x
 
 
 @keras.saving.register_keras_serializable(package="MyLayers")
@@ -427,20 +241,15 @@ class ConvBlock(layers.Layer):
         self.embed_dim = embed_dim
         self.const = None
         self.conv000 = layers.Conv1D(embed_dim, 3, padding='same', activation=tf.nn.gelu,
-                                     kernel_constraint=self.const,
                                      )
         self.conv010 = layers.Conv1D(embed_dim, 5, padding='same', activation=tf.nn.gelu,
-                                     kernel_constraint=self.const,
                                      )
         self.conv011 = layers.Conv1D(embed_dim, 7, padding='same', activation=tf.nn.gelu,
-                                     kernel_constraint=self.const,
                                      )
 
         self.conv020 = layers.Conv1D(embed_dim, 7, padding='same', activation=tf.nn.gelu,
-                                     kernel_constraint=self.const,
                                      )
         self.conv021 = layers.Conv1D(embed_dim, 15, padding='same', activation=tf.nn.gelu,
-                                     kernel_constraint=self.const,
                                      )
         self.add = layers.Add()
 
@@ -473,26 +282,7 @@ class ConvBlock(layers.Layer):
         )
         return config
 
-    # @classmethod
-    # def from_config(cls, config):
-    #     # Note that you can also use `keras.saving.deserialize_keras_object` here
-    #     config["embed_dim"] = keras.layers.deserialize(config["embed_dim"])
-    #     config["const"] = keras.layers.deserialize(config["const"])
-    #     config["conv000"] = keras.layers.deserialize(config["conv000"])
-    #     config["conv010"] = keras.layers.deserialize(config["conv010"])
-    #     config["conv011"] = keras.layers.deserialize(config["conv011"])
-    #     config["conv020"] = keras.layers.deserialize(config["conv020"])
-    #     config["conv021"] = keras.layers.deserialize(config["conv021"])
-    #     config["add"] = keras.layers.deserialize(config["add"])
-    #     config["conv100"] = keras.layers.deserialize(config["conv100"])
-    #     config["bn0"] = keras.layers.deserialize(config["bn0"])
-    #     config["bn1"] = keras.layers.deserialize(config["bn1"])
-    #     config["dw_conv"] = keras.layers.deserialize(config["dw_conv"])
-    #     config["activation"] = keras.layers.deserialize(config["activation"])
-    #     return cls(**config)
-
-    def call(self, inputs, training):
-        # Could add skip connection here?
+    def call(self, inputs):
         xa = self.conv000(inputs)
 
         xb = self.conv010(xa)
@@ -511,21 +301,21 @@ class ConvBlock(layers.Layer):
 
 
 @keras.saving.register_keras_serializable(package="MyLayers", name="chunk_module")
-def chunk_module(input_len, embed_dim, num_heads, attention_range,
-                 start_offset=0, end_offset=0):
+def chunk_module(input_len, embed_dim, num_heads,
+                 start_offset=0, end_offset=0, dropout_rate=0.25):
     projection_dim = embed_dim
     inputs = layers.Input(shape=(input_len, embed_dim))
     xa = inputs
-    xa0 = SelfAttnChunk(projection_dim, num_heads, projection_dim // 2, attention_range,
-                        start_offset, end_offset, 1, include_embedding_layer=False)(xa)
+    xa0 = TransformerBlock(projection_dim, num_heads, projection_dim // 2,
+                           start_offset=start_offset, end_offset=end_offset, dropout_rate=0.0)([xa, xa])
 
     xa = ConvBlock(projection_dim)(xa0)
     xa_skip = ConvBlock(projection_dim)(xa)
 
     xa = layers.Dense(projection_dim, activation=tf.nn.gelu)(xa)
     xa = ConvBlock(projection_dim)(xa)
-    xa = CrossAttnChunk(0, 0)([xa, xa0])
-    xa = layers.Dropout(0.25)(xa)
+    xa = CrossAttentionLayer(projection_dim, projection_dim, dropout_rate=0.0)([xa, xa0])
+    xa = layers.Dropout(dropout_rate)(xa)
     xa = ConvBlock(projection_dim)(xa)
 
     xa = layers.Concatenate(axis=-1)([xa_skip, xa])
@@ -534,35 +324,32 @@ def chunk_module(input_len, embed_dim, num_heads, attention_range,
     return model
 
 
-## STI Model
+## STICI Model
 @keras.saving.register_keras_serializable(package="MyModels")
-class SplitTransformer(keras.Model):
+class STICI(keras.Model):
     def __init__(self,
                  embed_dim,
                  num_heads,
                  offset_before=0,
                  offset_after=0,
-                 chunk_size=2000,
+                 chunk_size=2048,
                  activation=tf.nn.gelu,
                  dropout_rate=0.25,
-                 attn_block_repeats=1,
-                 attention_range=100,
-                 in_channel=2,
+                 attention_range=64,
                  **kwargs):
-        super(SplitTransformer, self).__init__(**kwargs)
+        super(STICI, self).__init__(**kwargs)
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.chunk_size = chunk_size
         self.activation = activation
         self.dropout_rate = dropout_rate
-        self.attn_block_repeats = attn_block_repeats
         self.attention_range = attention_range
         self.offset_before = offset_before
         self.offset_after = offset_after
-        self.in_channel = in_channel
 
     def build(self, input_shape):
         self.seq_len = input_shape[1]
+        self.in_channel = input_shape[-1]
         self.chunk_starts = list(range(0, input_shape[1], self.chunk_size))
         self.chunk_ends = []
         for cs in self.chunk_starts:
@@ -571,18 +358,15 @@ class SplitTransformer(keras.Model):
         self.mask_ends = [min(ce + self.attention_range, input_shape[1]) for ce in self.chunk_ends]
         self.chunkers = [chunk_module(self.mask_ends[i] - self.mask_starts[i],
                                       self.embed_dim, self.num_heads,
-                                      self.attention_range,
                                       start_offset=cs - self.mask_starts[i],
-                                      end_offset=self.mask_ends[i] - self.chunk_ends[i]
-                                      ) for i, cs in enumerate(self.chunk_starts)]
+                                      end_offset=self.mask_ends[i] - self.chunk_ends[i],
+                                      dropout_rate=self.dropout_rate) for i, cs in enumerate(self.chunk_starts)]
 
         self.concat_layer = layers.Concatenate(axis=-2)
         self.embedding = CatEmbeddings(self.embed_dim)
-        # self.slice_layer = layers.Lambda(lambda x: x[:, self.offset_before:self.seq_len - self.offset_after],
-        #                                  name="output_slicer")
         self.after_concat_layer = layers.Conv1D(self.embed_dim // 2, 5, padding='same', activation=tf.nn.gelu)
         self.last_conv = layers.Conv1D(self.in_channel - 1, 5, padding='same', activation=tf.nn.softmax)
-        super(SplitTransformer, self).build(input_shape)
+        super(STICI, self).build(input_shape)
 
     def get_config(self):
         config = super().get_config()
@@ -595,7 +379,6 @@ class SplitTransformer(keras.Model):
                 "chunk_size": self.chunk_size,
                 "activation": self.activation,
                 "dropout_rate": self.dropout_rate,
-                "attn_block_repeats": self.attn_block_repeats,
                 "attention_range": self.attention_range,
                 "in_channel": self.in_channel,
                 "seq_len": self.seq_len,
@@ -607,101 +390,119 @@ class SplitTransformer(keras.Model):
                 "chunkers": self.chunkers,
                 "concat_layer": self.concat_layer,
                 "embedding": self.embedding,
-                # "slice_layer": self.slice_layer,
                 "after_concat_layer": self.after_concat_layer,
                 "last_conv": self.last_conv,
             }
         )
         return config
 
-    # @classmethod
-    # def from_config(cls, config):
-    #     # Note that you can also use `keras.saving.deserialize_keras_object` here
-    #     config["embed_dim"] = keras.layers.deserialize(config["embed_dim"])
-    #     config["num_heads"] = keras.layers.deserialize(config["num_heads"])
-    #     config["offset_before"] = keras.layers.deserialize(config["offset_before"])
-    #     config["offset_after"] = keras.layers.deserialize(config["offset_after"])
-    #     config["chunk_size"] = keras.layers.deserialize(config["chunk_size"])
-    #     config["activation"] = keras.layers.deserialize(config["activation"])
-    #     config["attn_block_repeats"] = keras.layers.deserialize(config["attn_block_repeats"])
-    #     config["dropout_rate"] = keras.layers.deserialize(config["dropout_rate"])
-    #     config["attention_range"] = keras.layers.deserialize(config["attention_range"])
-    #     config["in_channel"] = keras.layers.deserialize(config["in_channel"])
-    #     config["seq_len"] = keras.layers.deserialize(config["seq_len"])
-
-    #     config["chunk_starts"] = keras.layers.deserialize(config["chunk_starts"])
-    #     config["chunk_ends"] = keras.layers.deserialize(config["chunk_ends"])
-    #     config["mask_starts"] = keras.layers.deserialize(config["mask_starts"])
-    #     config["mask_ends"] = keras.layers.deserialize(config["mask_ends"])
-    #     config["chunkers"] = keras.layers.deserialize(config["chunkers"])
-    #     config["concat_layer"] = keras.layers.deserialize(config["concat_layer"])
-    #     config["embedding"] = keras.layers.deserialize(config["embedding"])
-    #     # config["slice_layer"] = keras.layers.deserialize(config["slice_layer"])
-    #     config["after_concat_layer"] = keras.layers.deserialize(config["after_concat_layer"])
-    #     config["last_conv"] = keras.layers.deserialize(config["last_conv"])
-    #     return cls(**config)
-
-    def call(self, inputs):
+    def call(self, inputs, training=False):
         x = self.embedding(inputs)
         chunks = [self.chunkers[i](x[:,
-                                   self.mask_starts[i]:self.mask_ends[i]]) for i, chunker \
+                                   self.mask_starts[i]:self.mask_ends[i]], training=training) for i, chunker \
                   in enumerate(self.chunkers)]
         x = self.concat_layer(chunks)
         x = self.after_concat_layer(x)
         x = self.last_conv(x)
-        # x = self.slice_layer(x)
         x = x[:, self.offset_before:self.seq_len - self.offset_after]
         return x
 
 
-custom_objects = {"SplitTransformer": SplitTransformer, "chunk_module": chunk_module, "ConvBlock": ConvBlock,
-                  "CrossAttnChunk": CrossAttnChunk, "SelfAttnChunk": SelfAttnChunk, "GenoEmbeddings": CatEmbeddings,
-                  "MaskedTransformerBlock": MaskedTransformerBlock, "CrossAttentionLayer": CrossAttentionLayer, }
+custom_objects = {"STICI": STICI,
+                  "chunk_module": chunk_module,
+                  "ConvBlock": ConvBlock,
+                  "GenoEmbeddings": CatEmbeddings,
+                  "TransformerBlock": TransformerBlock,
+                  "CrossAttentionLayer": CrossAttentionLayer}
 
 
 ## Loss
+import tensorflow as tf
+
 class ImputationLoss(tf.keras.losses.Loss):
+    def __init__(self, use_r2_loss=True, **kwargs):
+        super(ImputationLoss, self).__init__(**kwargs)
+        self.ce_loss_obj = tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.SUM)
+        self.kld_loss_obj = tf.keras.losses.KLDivergence(reduction=tf.keras.losses.Reduction.SUM)
+        self.use_r2_loss = use_r2_loss
+
+    def calculate_Minimac_R2(self, pred_alt_allele_probs, gt_alt_af):
+        mask = tf.logical_or(tf.equal(gt_alt_af, 0.0), tf.equal(gt_alt_af, 1.0))
+        gt_alt_af = tf.where(mask, 0.5, gt_alt_af)
+        denom = gt_alt_af * (1.0 - gt_alt_af)
+        denom = tf.where(denom < 0.01, 0.01, denom)
+        r2 = tf.reduce_mean(tf.square(pred_alt_allele_probs - gt_alt_af), axis=0) / denom
+        r2 = tf.where(mask, tf.zeros_like(r2), r2)
+        return r2
+
     def call(self, y_true, y_pred):
-        y_pred = tf.convert_to_tensor(y_pred)
         y_true = tf.cast(y_true, y_pred.dtype)
 
-        loss_obj = tf.keras.losses.CategoricalCrossentropy(reduction=tf.keras.losses.Reduction.SUM)
-        cat_loss = loss_obj(y_true, y_pred)
+        cat_loss = self.ce_loss_obj(y_true, y_pred)
+        kl_loss = self.kld_loss_obj(y_true, y_pred)
 
-        loss_obj = tf.keras.losses.KLDivergence(reduction=tf.keras.losses.Reduction.SUM)
-        kl_loss = loss_obj(y_true, y_pred)
+        total_loss = cat_loss + kl_loss
 
-        return cat_loss + kl_loss
+        if self.use_r2_loss:
+            batch_size = tf.shape(y_true)[0]
+            group_size = 4
+            num_full_groups = batch_size // group_size
+            num_remainder_samples = batch_size % group_size
+
+            y_true_grouped = tf.reshape(y_true[:num_full_groups * group_size], (num_full_groups, group_size) + tuple(y_true.shape[1:]))
+            y_pred_grouped = tf.reshape(y_pred[:num_full_groups * group_size], (num_full_groups, group_size) + tuple(y_pred.shape[1:]))
+
+            r2_loss = 0.0
+            for i in range(num_full_groups):
+                gt_alt_af = tf.cast(tf.math.count_nonzero(tf.argmax(y_true_grouped[i], axis=-1), axis=0), tf.int32) / group_size
+                gt_alt_af = tf.cast(gt_alt_af, tf.float32)
+                pred_alt_allele_probs = tf.reduce_sum(y_pred_grouped[i][:, :, 1:], axis=-1)
+                r2_loss += -tf.reduce_sum(self.calculate_Minimac_R2(pred_alt_allele_probs, gt_alt_af)) * tf.cast(group_size, tf.float32)
+
+            if num_remainder_samples > 0:
+                remainder_start_index = num_full_groups * group_size
+                y_true_remainder = y_true[remainder_start_index:]
+                y_pred_remainder = y_pred[remainder_start_index:]
+
+                gt_alt_af = tf.cast(tf.math.count_nonzero(tf.argmax(y_true_remainder, axis=-1), axis=0), tf.int32) / num_remainder_samples
+                gt_alt_af = tf.cast(gt_alt_af, tf.float32)
+                pred_alt_allele_probs = tf.reduce_sum(y_pred_remainder[:, :, 1:], axis=-1)
+                r2_loss += -tf.reduce_sum(self.calculate_Minimac_R2(pred_alt_allele_probs, gt_alt_af)) * tf.cast(num_remainder_samples, tf.float32)
+
+            total_loss += r2_loss
+        return total_loss
 
 
 ## Model creation
 def create_model(args):
-    model = SplitTransformer(embed_dim=args["embedding_dim"],
+    model = STICI(embed_dim=args["embedding_dim"],
                              num_heads=args["num_heads"],
                              chunk_size=args["chunk_size"],
                              activation=tf.nn.gelu,
                              attention_range=args["chunk_overlap"],
-                             in_channel=args["in_channel"],
                              offset_before=args["offset_before"],
                              offset_after=args["offset_after"])
     optimizer = tfa.optimizers.LAMB(learning_rate=args["lr"])
-    model.compile(optimizer, loss=ImputationLoss(), metrics=tf.keras.metrics.CategoricalAccuracy())
+    # optimizer = tf.optimizers.AdamW(learning_rate=args["lr"], weight_decay=1e-5)
+    model.compile(optimizer, loss=ImputationLoss(use_r2_loss=args["use_r2"]),
+                  metrics=tf.keras.metrics.CategoricalAccuracy())
     return model
 
 
-def create_callbacks(metric="val_loss", save_path="."):
+def create_callbacks(metric="loss", save_path="."):
     reducelr = tf.keras.callbacks.ReduceLROnPlateau(
         monitor=metric,
         mode='auto',
         factor=0.5,
         patience=3,
+        min_lr=1e-7,
         verbose=0
     )
 
     earlystop = tf.keras.callbacks.EarlyStopping(
-        monitor=metric,
+        monitor=f"val_{metric}",
         mode='auto',
-        patience=10,
+        patience=35,
         verbose=1,
         restore_best_weights=True
     )
@@ -794,7 +595,7 @@ class DataReader:
             raise IOError("The file only contains comments!")
         df = dt.fread(file=file_path,
                       sep=separator, header=True, skip_to_line=line_counter + 1)
-        df = df.to_pandas()#.astype('category')
+        df = df.to_pandas()  # .astype('category')
         if first_column_is_index:
             df.set_index(df.columns[0], inplace=True)
         return df
@@ -843,7 +644,7 @@ class DataReader:
         self.target_is_gonna_be_phased = target_is_gonna_be_phased_or_haps
         self.ref_file_extension, self.ref_separator = self.__find_file_extension(file_path, file_format, delimiter)
         if file_format == "infer":
-            pprint(f"Ref file format is {self.ref_file_extension} and Ref file sep is {self.ref_separator}.")
+            pprint(f"Ref file format is {self.ref_file_extension}.")
 
         self.reference_panel = self.__read_csv(file_path, is_reference=True, is_vcf=False, separator=self.ref_separator,
                                                first_column_is_index=first_column_is_index,
@@ -887,7 +688,7 @@ class DataReader:
             return np.array(list(allele_set))
 
         genotype_vals = pd.unique(self.reference_panel.iloc[:, self.ref_sample_value_index - 1:].values.ravel('K'))
-        # print(f"Unique genotypes: {genotype_vals}")
+        # print(f"DEBUG: Unique genotypes in dataset: {genotype_vals}")
         if self.ref_is_phased and not target_is_gonna_be_phased_or_haps:  # In this case ref is not haps due to the above checks
             # Convert phased values in the reference to unphased values
             phased_to_unphased_dict = {}
@@ -903,12 +704,15 @@ class DataReader:
         self.alleles = get_diploid_allels(self.genotype_vals) if not self.ref_is_hap else self.genotype_vals
         self.allele_count = len(self.alleles)
         self.MISSING_VALUE = self.allele_count if self.is_phased else len(self.genotype_vals)
+        # pprint(f"DEBUG: self.genotype_vals: {self.genotype_vals}")
 
         if self.is_phased:
             self.hap_map = {str(v): i for i, v in enumerate(list(sorted(self.alleles)))}
             self.hap_map.update({".": self.MISSING_VALUE})
             self.r_hap_map = {i: k for k, i in self.hap_map.items()}
             self.map_preds_2_allele = np.vectorize(lambda x: self.r_hap_map[x])
+            # pprint(f"DEBUG: hap_map: {self.hap_map}")
+            # pprint(f"DEBUG: r_hap_map: {self.r_hap_map}")
         else:
             unphased_missing_genotype = "./."
             self.replacement_dict = {g: i for i, g in enumerate(list(sorted(self.genotype_vals)))}
@@ -916,6 +720,7 @@ class DataReader:
             self.reverse_replacement_dict = {v: k for k, v in self.replacement_dict.items()}
 
         self.SEQ_DEPTH = self.allele_count + 1 if self.is_phased else len(self.genotype_vals)
+        # pprint(f"DEBUG:self.SEQ_DEPTH: {self.SEQ_DEPTH}")
         pprint("Done!")
 
     def assign_test_set(self, file_path,
@@ -1016,68 +821,87 @@ class DataReader:
             pprint("No variant indices provided or indices not valid, using the whole sequence...")
             return self.__get_forward_data(data=self.target_set.iloc[:, self.target_sample_value_index - 1:])
 
-    def __convert_genotypes_to_vcf(self, genotypes, pred_format="GT:DS:GP"):
-        n_samples, n_variants = genotypes.shape
-        new_vcf = self.target_set.copy()
-        new_vcf.iloc[:n_variants, 9:] = genotypes.T
-        new_vcf["FORMAT"] = pred_format
-        new_vcf["QUAL"] = "."
-        new_vcf["FILTER"] = "."
-        new_vcf["INFO"] = "IMPUTED"
-        return new_vcf
-
     def __convert_hap_probs_to_diploid_genotypes(self, allele_probs) -> np.ndarray:
         n_haploids, n_variants, n_alleles = allele_probs.shape
-        allele_probs_normalized = softmax(allele_probs, axis=-1)
+        # squared_allele_probs = allele_probs ** 10  # To reduce entropy
+        # normalized_squared_probabilities = squared_allele_probs / np.sum(squared_allele_probs, axis=-1, keepdims=True)
 
         if n_haploids % 2 != 0:
             raise ValueError("Number of haploids should be even.")
 
+        if n_alleles == 2:
+            print("Outputting GP in predictions.")
+
         n_samples = n_haploids // 2
         genotypes = np.empty((n_samples, n_variants), dtype=object)
+        haploids_as_diploids = allele_probs.reshape((n_samples, 2, n_variants, -1))
+        variant_genotypes = self.map_preds_2_allele(
+            np.argmax(haploids_as_diploids, axis=-1))  # (n_haploids, 2, n_variants)
 
-        for i in tqdm(range(n_samples)):
-            # haploid_1 = allele_probs_normalized[2 * i]
-            # haploid_2 = allele_probs_normalized[2 * i + 1]
+        def process_variant_in_sample(haps_for_sample_at_variant, variant_genotypes_for_sample_at_variant):
+            if n_alleles > 2:
+                return '|'.join(variant_genotypes_for_sample_at_variant)
+            else:
+                # output GP
+                phased_probs = np.outer(haps_for_sample_at_variant[0], haps_for_sample_at_variant[1]).flatten()
+                unphased_probs = np.array([phased_probs[0], phased_probs[1] + phased_probs[2], phased_probs[-1]])
+                unphased_probs_str = ",".join([f"{v:.6f}" for v in unphased_probs])
+                alt_dosage = np.dot(unphased_probs, [0, 1, 2])
+                return '|'.join(variant_genotypes_for_sample_at_variant) + f":{unphased_probs_str}:{alt_dosage:.3f}"
 
-            for j in range(n_variants):
-                # phased_probs = np.multiply.outer(haploid_1[j], haploid_2[j]).flatten()
-                # unphased_probs = np.array([phased_probs[0], sum(phased_probs[1:3]), phased_probs[-1]])
-                # unphased_probs_str = ",".join([f"{v:.6f}" for v in unphased_probs])
-                # alt_dosage = np.dot(unphased_probs, [0, 1, 2])
-                variant_genotypes = [self.r_hap_map[v] for v in np.argmax(allele_probs_normalized[i * 2:(i + 1) * 2, j], axis=-1)]
-                genotypes[i, j] = '|'.join(variant_genotypes)  # + f":{alt_dosage:.3f}:{unphased_probs_str}"
+        def process_sample(i):
+            return np.array([
+                process_variant_in_sample(haploids_as_diploids[i, :, j, :], variant_genotypes[i, :, j])
+                for j in range(n_variants)
+            ])
 
-        return genotypes
+        # Parallel processing with joblib
+        genotypes = Parallel(n_jobs=-1)(delayed(process_sample)(i) for i in tqdm(range(n_samples)))
+
+        return np.array(genotypes)
 
     def __convert_hap_probs_to_hap_genotypes(self, allele_probs) -> np.ndarray:
-        allele_probs_normalized = softmax(allele_probs, axis=-1)
-        return np.argmax(allele_probs_normalized, axis=1).astype(str)
+        return np.argmax(allele_probs, axis=1).astype(str)
 
     def __convert_unphased_probs_to_genotypes(self, allele_probs) -> np.ndarray:
         n_samples, n_variants, n_alleles = allele_probs.shape
-        allele_probs_normalized = softmax(allele_probs, axis=-1)
         genotypes = np.zeros((n_samples, n_variants), dtype=object)
 
         for i in tqdm(range(n_samples)):
             for j in range(n_variants):
-                unphased_probs = allele_probs_normalized[i, j]
+                unphased_probs = allele_probs[i, j]
                 variant_genotypes = np.vectorize(self.reverse_replacement_dict.get)(
                     np.argmax(unphased_probs, axis=-1)).flatten()
                 genotypes[i, j] = variant_genotypes
 
         return genotypes
 
-    def __get_headers_for_output(self, contain_probs):
+    def __get_headers_for_output(self, contain_probs, chr=22):
         headers = ["##fileformat=VCFv4.2",
-                   '''##source=STI v1.1.0''',
+                   '''##source=STI v1.2.0''',
+
+                   '''##INFO=<ID=AF,Number=A,Type=Float,Description="Estimated Alternate Allele Frequency">''',
+                   '''##INFO=<ID=MAF,Number=1,Type=Float,Description="Estimated Minor Allele Frequency">''',
+                   '''##INFO=<ID=AVG_CS,Number=1,Type=Float,Description="Average Call Score">''',
                    '''##INFO=<ID=IMPUTED,Number=0,Type=Flag,Description="Marker was imputed">''',
                    '''##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">''',
                    ]
         probs_headers = [
             '''##FORMAT=<ID=DS,Number=A,Type=Float,Description="Estimated Alternate Allele Dosage : [P(0/1)+2*P(1/1)]">''',
             '''##FORMAT=<ID=GP,Number=G,Type=Float,Description="Estimated Posterior Probabilities for Genotypes 0/0, 0/1 and 1/1">''']
-        return headers.extend(probs_headers) if contain_probs else headers
+        if contain_probs:
+            headers.extend(probs_headers)
+        return headers
+
+    def __convert_genotypes_to_vcf(self, genotypes, pred_format="GT:GP:DS"):
+        new_vcf = self.target_set.copy()
+        new_vcf[
+            new_vcf.columns[self.target_sample_value_index - 1:]] = genotypes
+        new_vcf["FORMAT"] = pred_format
+        new_vcf["QUAL"] = "."
+        new_vcf["FILTER"] = "."
+        new_vcf["INFO"] = "IMPUTED"
+        return new_vcf
 
     def preds_to_genotypes(self, predictions: Union[str, np.ndarray]) -> pd.DataFrame:
         """
@@ -1099,9 +923,9 @@ class DataReader:
                 target_df.columns[self.target_sample_value_index - 1:]] = self.__convert_hap_probs_to_hap_genotypes(
                 preds).T
         else:
-            target_df[
-                target_df.columns[self.target_sample_value_index - 1:]] = self.__convert_hap_probs_to_diploid_genotypes(
-                preds).T
+            pred_format = "GT:GP:DS" if preds.shape[-1] == 2 else "GT"
+            target_df = self.__convert_genotypes_to_vcf(self.__convert_hap_probs_to_diploid_genotypes(
+                preds).T, pred_format)
         return target_df
 
     def write_ligated_results_to_file(self, df: pd.DataFrame, file_name: str, compress=True) -> str:
@@ -1110,7 +934,8 @@ class DataReader:
                 f"{file_name}.{to_write_format}", 'wt') as f_out:
             # write info
             if self.ref_file_extension == "vcf":
-                f_out.write("\n".join(self.__get_headers_for_output(contain_probs=False)) + "\n")
+                f_out.write(
+                    "\n".join(self.__get_headers_for_output(contain_probs="GP" in df["FORMAT"].values[0])) + "\n")
             else:  # Not the best idea?
                 f_out.write("\n".join(self.ref_n_header_lines))
         # pprint(f"Data to be saved shape: {df.shape}")
@@ -1120,12 +945,13 @@ class DataReader:
 
 
 @tf.function()
-def add_attention_mask(x_sample, y_sample, depth, mr):
-    mask_size = tf.cast(x_sample.shape[0] * mr, dtype=tf.int32)
-    mask_idx = tf.reshape(tf.random.shuffle(tf.range(x_sample.shape[0]))[:mask_size], (-1, 1))
-    updates = tf.math.add(tf.zeros(shape=(mask_idx.shape[0]), dtype=tf.int32), depth - 1)
+def add_attention_mask(x_sample, y_sample, depth, min_mr, max_mr):
+    seq_len = tf.shape(x_sample)[0]
+    masking_rate = tf.random.uniform([], min_mr, max_mr)
+    mask_size = tf.cast(tf.cast(seq_len, tf.float32) * masking_rate, dtype=tf.int32)
+    mask_idx = tf.reshape(tf.random.shuffle(tf.range(seq_len))[:mask_size], (-1, 1))
+    updates = tf.ones(shape=(tf.shape(mask_idx)[0]), dtype=tf.int32) * (depth - 1)
     X_masked = tf.tensor_scatter_nd_update(x_sample, mask_idx, updates)
-
     return tf.one_hot(X_masked, depth), tf.one_hot(y_sample, depth - 1)
 
 
@@ -1134,10 +960,27 @@ def onehot_encode(x_sample, depth):
     return tf.one_hot(x_sample, depth)
 
 
+def calculate_maf(genotype_array):
+    allele_counts = np.apply_along_axis(lambda x: np.bincount(x, minlength=3), axis=0, arr=genotype_array)
+    total_alleles = 2 * genotype_array.shape[0]
+    minor_allele_counts = 2 * allele_counts[2] + allele_counts[1]
+    maf = minor_allele_counts / total_alleles
+    return maf
+
+
+def remove_similar_rows(array):
+    print("Finding duplicate haploids in training set.")
+    unique_array = np.unique(array, axis=0)
+    print(f"Removed {len(array) - len(unique_array)} rows. {len(unique_array)} training samples remaining.")
+    return unique_array
+
+
 def get_training_dataset(x, batch_size, depth, strategy,
                          offset_before=0, offset_after=0,
-                         training=True, masking_rate=0.8):
+                         training=True, masking_rates=(.5, .99)):
     AUTO = tf.data.AUTOTUNE
+    if training:
+        x = remove_similar_rows(x)
     print(f"target_shape: {x[0:1, offset_before:x.shape[1] - offset_after].shape}")
     dataset = tf.data.Dataset.from_tensor_slices((x, x[:, offset_before:x.shape[1] - offset_after]))
     # # Add Attention Mask
@@ -1147,7 +990,7 @@ def get_training_dataset(x, batch_size, depth, strategy,
         dataset = dataset.repeat()
 
     # Add Attention Mask
-    dataset = dataset.map(lambda xx, yy: add_attention_mask(xx, yy, depth, masking_rate),
+    dataset = dataset.map(lambda xx, yy: add_attention_mask(xx, yy, depth, masking_rates[0], masking_rates[1]),
                           num_parallel_calls=AUTO, deterministic=False)
 
     # Prefetech to not map the whole dataset
@@ -1158,13 +1001,15 @@ def get_training_dataset(x, batch_size, depth, strategy,
     # This part is for multi-gpu servers
     options = tf.data.Options()
     options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.FILE
+    options.experimental_optimization.noop_elimination = True
+    options.experimental_optimization.apply_default_optimizations = False
     dataset = dataset.with_options(options)
     dataset = strategy.experimental_distribute_dataset(dataset)
 
-    return dataset
+    return dataset, len(x)
 
 
-def get_test_dataset(x, batch_size, depth):
+def get_test_dataset(x, batch_size, depth, strategy):
     AUTO = tf.data.AUTOTUNE
     dataset = tf.data.Dataset.from_tensor_slices((x))
     # one-hot encode
@@ -1178,6 +1023,8 @@ def get_test_dataset(x, batch_size, depth):
     # This part is for multi-gpu servers
     # options = tf.data.Options()
     # options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.FILE
+    # options.experimental_optimization.noop_elimination = True
+    # options.experimental_optimization.apply_default_optimizations = False
     # dataset = dataset.with_options(options)
     # dataset = strategy.experimental_distribute_dataset(dataset)
 
@@ -1222,22 +1069,21 @@ def save_chunk_status(save_dir, chunk_info) -> None:
         json.dump(chunk_info, outfile)
 
 
+def get_func_from_saved_model(saved_model_dir):
+    saved_model_loaded = tf.saved_model.load(
+        saved_model_dir, tags=[tag_constants.SERVING])
+    graph_func = saved_model_loaded.signatures[
+        signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY]
+    return graph_func, saved_model_loaded
+
+
 def train_the_model(args) -> None:
-    if args.val_frac <= 0 or args.val_frac >= 1:
-        raise args.ArgumentError(None, message="Validation fraction should be a positive value in range of (0, 1)")
     if args.restart_training:
         clear_dir(args.save_dir)
-
+    assert args.max_mr > 0
+    assert args.min_mr > 0
+    assert args.max_mr >= args.min_mr
     NUM_EPOCHS = args.epochs
-    # slurmClusterResolver = tf.distribute.cluster_resolver.SlurmClusterResolver(jobs=None,
-    # port_base=8888,
-    # gpus_per_node=2,
-    # gpus_per_task=1,
-    # tasks_per_node=None,
-    # auto_set_gpu=True,
-    # rpc_layer='grpc')
-
-    # strategy = tf.distribute.MultiWorkerMirroredStrategy(slurmClusterResolver)
     strategy = tf.distribute.MirroredStrategy(cross_device_ops=tf.distribute.ReductionToOneDevice())
     N_REPLICAS = strategy.num_replicas_in_sync
     pprint(f"Num gpus to be used: {N_REPLICAS}")
@@ -1256,11 +1102,9 @@ def train_the_model(args) -> None:
                            comments=args.ref_comment)
 
     x_train_indices, x_valid_indices = train_test_split(range(dr.get_ref_set(0, 1).shape[0]),
-                                                        test_size=args.val_frac,
+                                                        test_size=BATCH_SIZE * args.val_n_batches,
                                                         random_state=args.random_seed,
                                                         shuffle=True, )
-    steps_per_epoch = len(x_train_indices) // BATCH_SIZE
-    validation_steps = len(x_valid_indices) // BATCH_SIZE
 
     break_points = list(np.arange(0, dr.VARIANT_COUNT, args.sites_per_model)) + [dr.VARIANT_COUNT]
     chunks_done = load_chunk_info(args.save_dir, break_points)
@@ -1268,7 +1112,7 @@ def train_the_model(args) -> None:
         if chunks_done[w]:
             pprint(f"Skipping chunk {w + 1}/{len(break_points) - 1} due to previous training.")
             continue
-        if args.which_chunk != -1 and w+1 != args.which_chunk:
+        if args.which_chunk != -1 and w + 1 != args.which_chunk:
             pprint(f"Skipping chunk {w + 1}/{len(break_points) - 1} due to your request using --which-chunk.")
             continue
 
@@ -1279,18 +1123,20 @@ def train_the_model(args) -> None:
         offset_after = final_end_pos - break_points[w + 1]
         ref_set = dr.get_ref_set(final_start_pos, final_end_pos).astype(np.int32)
         pprint(f"Data shape: {ref_set.shape}")
-        train_dataset = get_training_dataset(ref_set[x_train_indices], BATCH_SIZE,
-                                             depth=dr.SEQ_DEPTH,
-                                             strategy=strategy,
-                                             offset_before=offset_before,
-                                             offset_after=offset_after,
-                                             masking_rate=args.mr)
-        valid_dataset = get_training_dataset(ref_set[x_valid_indices], BATCH_SIZE,
-                                             depth=dr.SEQ_DEPTH,
-                                             strategy=strategy,
-                                             offset_before=offset_before,
-                                             offset_after=offset_after, training=False,
-                                             masking_rate=args.mr)
+        train_dataset, train_sample_count = get_training_dataset(ref_set[x_train_indices], BATCH_SIZE,
+                                                                 depth=dr.SEQ_DEPTH,
+                                                                 strategy=strategy,
+                                                                 offset_before=offset_before,
+                                                                 offset_after=offset_after,
+                                                                 masking_rates=(args.min_mr, args.max_mr))
+        valid_dataset, _ = get_training_dataset(ref_set[x_valid_indices], BATCH_SIZE,
+                                                depth=dr.SEQ_DEPTH,
+                                                strategy=strategy,
+                                                offset_before=offset_before,
+                                                offset_after=offset_after, training=False,
+                                                masking_rates=(args.min_mr, args.max_mr))
+        steps_per_epoch = train_sample_count // BATCH_SIZE
+        validation_steps = len(x_valid_indices) // BATCH_SIZE
         del ref_set
         K.clear_session()
         callbacks = create_callbacks(save_path=f"{args.save_dir}/models/w_{w}/cp.ckpt")
@@ -1299,10 +1145,10 @@ def train_the_model(args) -> None:
             "num_heads": args.na_heads,
             "chunk_size": args.cs,
             "chunk_overlap": args.co,
-            "in_channel": dr.SEQ_DEPTH,
             "offset_before": offset_before,
             "offset_after": offset_after,
-            "lr": args.lr
+            "lr": args.lr,
+            "use_r2": args.use_r2,
         }
         with strategy.scope():
             model = create_model(model_args)
@@ -1310,7 +1156,7 @@ def train_the_model(args) -> None:
                                 epochs=NUM_EPOCHS,
                                 validation_data=valid_dataset,
                                 validation_steps=validation_steps,
-                                callbacks=callbacks, verbose=2)
+                                callbacks=callbacks, verbose=args.verbose)
             model.save(f"{args.save_dir}/models/w_{w}.ckpt")
             # tf.saved_model.save(model, f"{args.save_dir}/models/w_{w}.keras")
             chunks_done[w] = True
@@ -1319,6 +1165,28 @@ def train_the_model(args) -> None:
 
 
 def impute_the_target(args):
+    from tensorflow.keras import mixed_precision
+
+    mixed_precision.set_global_policy('mixed_float16')
+
+    strategy = tf.distribute.get_strategy()
+    # strategy = tf.distribute.MirroredStrategy(cross_device_ops=tf.distribute.ReductionToOneDevice())
+
+    if len(tf.config.list_physical_devices('GPU')) == 0:
+        N_REPLICAS = psutil.cpu_count(logical=False) - 2
+        pprint(f"Num cpu cores to be used: {N_REPLICAS}")
+        # tf.config.threading.set_intra_op_parallelism_threads(num_threads=N_REPLICAS)  # Number of threads for each operation
+        # tf.config.threading.set_inter_op_parallelism_threads(num_threads=4)  # Number of threads for multiple operations
+        BATCH_SIZE = args.batch_size_per_gpu * 1
+
+    else:
+        N_REPLICAS = strategy.num_replicas_in_sync
+        pprint(f"Num gpus to be used: {N_REPLICAS}")
+        BATCH_SIZE = args.batch_size_per_gpu * N_REPLICAS
+
+    if args.use_trt:
+        from tensorflow.python.compiler.tensorrt import trt_convert as trt
+
     if args.target is None:
         raise argparse.ArgumentError(None,
                                      message="Target file missing for imputation. use --target to specify a target file.")
@@ -1328,7 +1196,6 @@ def impute_the_target(args):
             training_args = json.load(f)
         # Ensure that sites-per-model is matched to the one used for training
         args.sites_per_model = training_args["sites_per_model"]
-        args.batch_size_per_gpu = training_args["batch_size_per_gpu"]
         args.tihp = training_args["tihp"]
         args.cs = training_args["cs"]
         args.co = training_args["co"]
@@ -1348,7 +1215,6 @@ def impute_the_target(args):
                        first_column_is_index=args.target_fcai,
                        comments=args.target_comment)
 
-    BATCH_SIZE = args.batch_size_per_gpu  # * N_REPLICAS
     all_preds = []
     break_points = list(np.arange(0, dr.VARIANT_COUNT, args.sites_per_model)) + [dr.VARIANT_COUNT]
     for w in range(len(break_points) - 1):
@@ -1356,16 +1222,27 @@ def impute_the_target(args):
         final_start_pos = max(0, break_points[w] - 2 * args.co)
         final_end_pos = min(dr.VARIANT_COUNT, break_points[w + 1] + 2 * args.co)
         test_dataset_np = dr.get_target_set(final_start_pos, final_end_pos).astype(np.int32)
-
+        steps = int(np.ceil(len(test_dataset_np) / BATCH_SIZE))
         K.clear_session()
-        model = tf.keras.models.load_model(
-            f"{args.save_dir}/models/w_{w}.ckpt",
-            custom_objects=custom_objects,
-            compile=False
-        )
+        test_dataset = get_test_dataset(test_dataset_np, BATCH_SIZE, depth=dr.SEQ_DEPTH, strategy=strategy)
+        if args.use_trt:
+            result_key = 'output_1'
+            model, _ = get_func_from_saved_model(f"{args.save_dir}/models/trt/w_{w}")
+            predict_onehot = []
+            with strategy.scope():
+                for batch in tqdm(test_dataset):
+                    predict_onehot.append(model(batch)[result_key])
+            predict_onehot = np.vstack(predict_onehot)
 
-        test_dataset = get_test_dataset(test_dataset_np, BATCH_SIZE, depth=dr.SEQ_DEPTH)
-        predict_onehot = model.predict(test_dataset, verbose=1)
+        else:
+            model = tf.keras.models.load_model(
+                f"{args.save_dir}/models/w_{w}.ckpt",
+                custom_objects=custom_objects,
+                compile=False
+            )
+            with strategy.scope():
+                predict_onehot = model.predict(test_dataset, verbose=args.verbose, steps=steps)
+
         all_preds.append(predict_onehot.astype(np.float32))
     all_preds = np.hstack(all_preds)
     destination_file_path = dr.write_ligated_results_to_file(dr.preds_to_genotypes(all_preds),
@@ -1392,14 +1269,6 @@ def str_to_bool(s):
 
 
 def main():
-    '''
-    target_is_gonna_be_phased_or_haps:bool,
-    variants_as_columns:bool=False,
-    delimiter=None,
-    file_format="infer",
-    first_column_is_index=True,
-    comments="##"
-    '''
     deciding_args_parser = argparse.ArgumentParser(description='ShiLab\'s Imputation model (STI v1.1).', add_help=False)
 
     ## Function mode
@@ -1418,8 +1287,11 @@ def main():
     parser.add_argument('--tihp', type=str, required=deciding_args.mode == 'train',
                         help='Whether the target is going to be haps or phased.',
                         choices=['false', 'true', '0', '1'])
+    parser.add_argument('--use-trt', type=str,
+                        help='Whether to use TensorRT for accelerated inference (it should be installed already in conda).',
+                        choices=['false', 'true', '0', '1'], default='0')
     parser.add_argument('--which-chunk', type=int, required=False,
-                        help='Which chunk to train on', default=-1)
+                        help='Which chunk to train on, starting at 1', default=-1)
     parser.add_argument('--ref-comment', type=str, required=False,
                         help='The character(s) used to indicate comment lines in the reference file (default="\\t").',
                         default="##")
@@ -1461,7 +1333,7 @@ def main():
                         default="infer",
                         choices=['infer'] + list(SUPPORTED_FILE_FORMATS))
 
-    ## save args
+    ## Saving args
     parser.add_argument('--save-dir', type=str, required=True, help='the path to save the results and the model.\n'
                                                                     'This path is also used to load a trained model for imputation.')
     parser.add_argument('--compress-results', type=str, required=False,
@@ -1474,12 +1346,13 @@ def main():
     parser.add_argument('--cs', type=int, required=False, help='Chunk size in terms of SNPs/SVs(default 2048)',
                         default=2048)
     parser.add_argument('--sites-per-model', type=int, required=False,
-                        help='Number of SNPs/SVs used per model(default 16000)', default=16000)
+                        help='Number of SNPs/SVs used per model(default 6144)', default=6144)
 
-    ## Model (hyper-)params
-    parser.add_argument('--mr', type=float, required=False, help='Masking rate(default 0.8)', default=0.8)
-    parser.add_argument('--val-frac', type=float, required=False,
-                        help='Fraction of reference samples to be used for validation (default=0.1).', default=0.1)
+    ## Model hyper-params
+    parser.add_argument('--max-mr', type=float, required=False, help='Maximum Masking rate(default 0.99)', default=0.99)
+    parser.add_argument('--min-mr', type=float, required=False, help='Minimum Masking rate(default 0.5)', default=0.5)
+    parser.add_argument('--val-n-batches', type=int, required=False,
+                        help='Number of batches to be used for validation (default=8).', default=8)
     parser.add_argument('--random-seed', type=int, required=False,
                         help='Random seed used for splitting the data into training and validation sets (default 2022).',
                         default=2022)
@@ -1489,12 +1362,20 @@ def main():
                         default=16)
     parser.add_argument('--embed-dim', type=int, required=False, help='Embedding dimension size (default 128)',
                         default=128)
-    parser.add_argument('--lr', type=float, required=False, help='Learning Rate (default 0.001)', default=0.001)
-    parser.add_argument('--batch-size-per-gpu', type=int, required=False, help='Batch size per gpu(default 2)',
-                        default=2)
+    parser.add_argument('--lr', type=float, required=False, help='Learning Rate (default 0.0005)', default=0.0005)
+    parser.add_argument('--batch-size-per-gpu', type=int, required=False, help='Batch size per gpu (default 4)',
+                        default=4)
+    parser.add_argument('--use-r2', type=str,
+                        help='Whether to use R^2 loss (default=True).',
+                        choices=['false', 'true', '0', '1'], default='1')
+    # misc
+    parser.add_argument('--verbose', type=int, required=False,
+                        help='Training verbosity', default=2)
 
     args = parser.parse_args()
     args.restart_training = str_to_bool(args.restart_training)
+    args.use_trt = str_to_bool(args.use_trt)
+    args.use_r2 = str_to_bool(args.use_r2)
     args.tihp = str_to_bool(args.tihp) if args.tihp else args.tihp
     args.ref_vac = str_to_bool(args.ref_vac)
     args.target_vac = str_to_bool(args.target_vac)
