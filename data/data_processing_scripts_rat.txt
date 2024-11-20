@@ -1,0 +1,41 @@
+plink --bfile round8_unpruned --chr 20 --maf 0.001 --filter-founders --recode vcf --out rat_genotypes_chr20_maf0.001
+head -n 61447 rat_genotypes_chr20_maf0.001.vcf > rat_genotypes_chr20_maf0.001_61440variants.vcf
+bgzip rat_genotypes_chr20_maf0.001_61440variants.vcf
+tabix rat_genotypes_chr20_maf0.001_61440variants.vcf.gz
+bcftools stats rat_genotypes_chr20_maf0.001_61440variants.vcf.gz > rat_genotypes_chr20_maf0.001_61440variants.stats
+bcftools annotate --set-id +'%CHROM:%POS:%REF:%ALT' --threads 10 rat_genotypes_chr20_maf0.001_61440variants.vcf.gz -Ou | bcftools +fill-tags -Oz -o rat_genotypes_chr20_maf0.001_61440variants_annotated.vcf.gz -- -t all
+
+# Next is prephasing
+```
+ROOT=~/data/rat2/whole_data
+TARGET=${ROOT}/rat_genotypes_chr20_maf0.001_61440variants_annotated
+CHR=20
+./phase_common_static --input ${TARGET}.vcf.gz --region ${CHR} --output-format bcf --output ${TARGET}_prephased.bcf --thread 40
+```
+bcftools convert -O z -o rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased.vcf.gz rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased.bcf
+
+# Check if there are shared haploids
+python3 copy_finder_whole.py
+
+bcftools view -S ./whole_data/test_samples.txt -Oz -o ./test_gt_imputation/rat_imputation_gt_test.vcf.gz ./whole_data/rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased.vcf.gz
+bcftools view -S ^./whole_data/test_samples.txt -Oz -o ./training_sets/rat_train.vcf.gz ./whole_data/rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased.vcf.gz
+tabix ./test_gt_imputation/rat_imputation_gt_test.vcf.gz
+tabix ./training_sets/rat_train.vcf.gz
+
+python3 create_test_set_with_missing_sites.py
+
+
+
+
+# Remove highly related samples
+plink --vcf rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased.vcf.gz --make-bed --out rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased_plink --double-id
+plink --bfile rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased_plink --genome --min 0.5 --out ibd_stats --threads 40
+python3 extract_unrelated_samples.py
+plink --bfile rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased_plink --remove remove_samples.txt --recode vcf --out rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased_unrelated
+bgzip rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased_unrelated.vcf
+tabix rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased_unrelated.vcf.gz
+
+bcftools annotate --set-id +'%CHROM\:%POS\:%REF\:%ALT' --threads 10 rat_genotypes_chr20_maf0.001_61440variants_annotated_prephased_unrelated.vcf.gz -Ou | bcftools +fill-tags -Oz -o rat_genotypes_chr20_maf0.001_61440variants_annotatedx2_prephased_unrelated.vcf.gz -- -t all
+tabix rat_genotypes_chr20_maf0.001_61440variants_annotatedx2_prephased_unrelated.vcf.gz
+
+
