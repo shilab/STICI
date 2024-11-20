@@ -161,7 +161,7 @@ conda create --name <env> --file requirements.txt
 Then install tensorflow >= 2.13.* using the official tensorflow website: https://www.tensorflow.org/install/pip
 ```
 >git clone https://github.com/ErfanMowlaei/STICI.git
->cd STICI-hpc
+>cd STICI-HPC
 >conda activate <env>
 [optional step]>export CUDA_VISIBLE_DEVICES=0,1,2
 python3 STICI_V1.1.py --mode ...
