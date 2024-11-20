@@ -138,7 +138,7 @@ Before imputation, you can use Tensor-RT to optimize the saved models and then u
 
 ## Known Issues:
 
-If all the SNPs/SVs do not fit into a single model due to GPU memory restrictions, you can set --sites-per-model parameter (<16000) to break the whole sequence into big chunks and model will train on each separately. The downside is that right now after each model is trained, tensorflow does not clear the memory and the training for the next (big) chunk will be stuck at epoch 1. A quick workaround is to run the code again (make sure --restart-training is set to 0 or false this time) and the code will pick up the training for the remaining (big) chunks.
+If all the SNPs/SVs do not fit into a single model due to GPU memory restrictions, you can set --sites-per-model parameter (<16000) to break the whole sequence into big chunks and model will train on each separately. The downside is that right now after each model is trained, tensorflow does not clear the memory and the training for the next (big) chunk will be stuck at epoch 1. A quick workaround is to run the code again (make sure --restart-training is set to 0 or false this time) and the code will pick up the training for the remaining (big) chunks. Also, the best results we got were using a batch size of 4. Higher batch sizes hurt the accuracy of the model.
 
 ## Getting Started:
 
