@@ -1,3 +1,22 @@
+"""
+Copyright (C) <2024>  <Mohammad Erfan Mowlaei>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+    Author email: erfan.molaei@gmail.com 
+"""
+
 '''
 Sample calls:
 python3 STICI_V1.1.py --mode train --which-chunk 1 --save-dir ./alaki --ref ./data/STI_benchmark_datasets/ALL.chr22.training.samples.100k.any.type.0.01.maf.variants.vcf.gz --min-mr 0.85 --max-mr 0.95 --cs 2048 --sites-per-model 10240 --co 64 --na-heads 16 --embed-dim 128 --batch-size-per-gpu 4 --tihp 1 --lr 0.002 --restart-training 1 --verbose 1
