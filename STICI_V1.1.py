@@ -1288,7 +1288,7 @@ def str_to_bool(s):
 
 
 def main():
-    deciding_args_parser = argparse.ArgumentParser(description='ShiLab\'s Imputation model (STI v1.1).', add_help=False)
+    deciding_args_parser = argparse.ArgumentParser(description='ShiLab\'s Imputation model (STICI v1.1).', add_help=False)
 
     ## Function mode
     deciding_args_parser.add_argument('--mode', type=str, help='Operation mode: impute | train (default=train)',
