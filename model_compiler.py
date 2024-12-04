@@ -1,4 +1,23 @@
 """
+    Copyright (C) 2024 Mohammad Erfan Mowlaei
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+   Author email: erfan.molaei@gmail.com 
+"""
+
+"""
 python model_compiler.py --save-dir ./beadchip_100k_any_variants_0.01_0.85_0.95_mr_1.1_e10 --ref ./data/STI_benchmark_datasets/ALL.chr22.training.samples.100k.any.type.0.01.maf.variants.vcf.gz --min-mr 0.85 --max-mr 0.95 --batch-size-per-gpu 8 --tihp 1 --co 64
 python model_compiler.py --save-dir ./simulated_30k_chr19_0.85_0.95_mr_1.1r2ne --ref ./data/erfan_simulations/ceu.model.OutOfAfrica_4J17.gmap.HapMapII_GRCh38.chr.19.50000.train.samples.30720.snps.biallelic.vcf.gz --min-mr 0.85 --max-mr 0.95 --batch-size-per-gpu 8 --tihp 1 --co 64
 python model_compiler.py --save-dir ./simulated_30k_chr19_0.85_0.95_mr_1.1r2ne_cs6144_bs4 --ref ./data/erfan_simulations/ceu.model.OutOfAfrica_4J17.gmap.HapMapII_GRCh38.chr.19.50000.train.samples.30720.snps.biallelic.vcf.gz --min-mr 0.85 --max-mr 0.95 --batch-size-per-gpu 30 --tihp 1 --co 64 --sites-per-model 6144
