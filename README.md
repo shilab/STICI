@@ -1,6 +1,6 @@
 # STICI
 Split-Transformer with Integrated Convolutions for Imputation source code
-
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.14271672.svg)](https://doi.org/10.5281/zenodo.14271672)
 ## Model architecture
 
 <p align="center">
