@@ -7,7 +7,7 @@ Split-Transformer with Integrated Convolutions for Genotype Imputation source co
 ## Model architecture
 
 <p align="center">
-  <img width="100%" height="auto" src="https://github.com/ErfanMowlaei/STICI/blob/09c0937bf1c3794bc067010a833cebaa98f40054/architecture.png">
+  <img width="100%" height="auto" src="https://github.com/shilab/STICI/blob/d0da6cddeb071ef41117936467e2297a999de286/architecture.png">
 </p>
 
 ## Overal workflow of STICI in pseudocode
