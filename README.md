@@ -6,7 +6,7 @@ Split Transformer Impute source code
 ## Model architecture
 
 <p align="center">
-  <img width="100%" height="auto" src="https://github.com/shilab/STI/blob/main/architecture.png">
+  <img width="100%" height="auto" src="https://github.com/shilab/STICI/blob/5a4aaa4e9605f6814b4e29337114e314a5762566/architecture.png">
 </p>
 
 ## Overal workflow of STI in pseudocode
