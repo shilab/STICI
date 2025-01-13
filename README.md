@@ -159,9 +159,9 @@ The code is adjusted to use all available GPUs. If you do not want that to happe
 
 Install required dependencies:
 ```
-conda create --name <env> --file requirements.txt
+conda env create -f STICI1.yml
 ```
-Then install tensorflow >= 2.13.* using the official tensorflow website: https://www.tensorflow.org/install/pip
+Then install tensorflow >= 2.14.* using the official tensorflow website: https://www.tensorflow.org/install/pip
 ```
 >git clone https://github.com/ErfanMowlaei/STICI.git
 >cd STICI-HPC
