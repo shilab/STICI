@@ -161,7 +161,11 @@ Install required dependencies:
 ```
 conda env create -f STICI1.yml
 ```
-Then install tensorflow >= 2.14.* using the official tensorflow website: https://www.tensorflow.org/install/pip
+In case the above solution doesn't work, please try the following after creating a fresh environment:
+```
+pip3 install tensorflow[and-cuda]==2.14.1 joblib==1.4.2 pandas==2.2.3 numpy==1.26.4 psutil==6.1.1 scikit-learn==1.6.1 scipy==1.13.1 tqdm
+```
+Then
 ```
 >git clone https://github.com/ErfanMowlaei/STICI.git
 >cd STICI-HPC
