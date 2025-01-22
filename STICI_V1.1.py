@@ -897,7 +897,7 @@ class DataReader:
 
     def __get_headers_for_output(self, contain_probs, chr=22):
         headers = ["##fileformat=VCFv4.2",
-                   '''##source=STI v1.2.0''',
+                   '''##source=STICI v1.2.0''',
 
                    '''##INFO=<ID=AF,Number=A,Type=Float,Description="Estimated Alternate Allele Frequency">''',
                    '''##INFO=<ID=MAF,Number=1,Type=Float,Description="Estimated Minor Allele Frequency">''',
