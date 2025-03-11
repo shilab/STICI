@@ -193,7 +193,7 @@ M. Erfan Mowlaei: tul67492[at]temple[dot]edu or erfan[dot]molaei[at]gmail[dot]co
 Prof. Xinghua Shi: mindyshi[at]temple[dot]edu
 
 ## Citation
-If you use our model in any project or publication, please cite our paper [Split-Transformer Impute (STI): Genotype Imputation Using a Transformer-Based Model](https://www.biorxiv.org/content/10.1101/2023.03.05.531190v1.abstract)
+If you use our model in any project or publication, please cite our paper [STICI: Split-Transformer with integrated convolutions for genotype imputation](https://www.nature.com/articles/s41467-025-56273-3)
 
 ```
 @article {Mowlaei2023.03.05.531190,
