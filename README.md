@@ -139,6 +139,11 @@ optional arguments:
 Please note that sample commands to run the code are placed at the start of the `STICI_V1.1.py` file.
 Before imputation, you can use Tensor-RT to optimize the saved models and then use `--use-trt 1` to allow STICI to use the optimized models for faster imputation.
 
+## Before you run your STICI:
+
+1. Please make sure that the reference variants have unique IDs (e.g., CHR:POS:REF:ID). Target VCF files should also the same pattern.
+2. The variants in the target set are a subset of the reference variants.
+
 ## Known Issues:
 
 If all the SNPs/SVs do not fit into a single model due to GPU memory restrictions, you can set --sites-per-model parameter (<16000) to break the whole sequence into big chunks and model will train on each separately. The downside is that right now after each model is trained, tensorflow does not clear the memory and the training for the next (big) chunk will be stuck at epoch 1. A quick workaround is to run the code again (make sure --restart-training is set to 0 or false this time) and the code will pick up the training for the remaining (big) chunks. Also, the best results we got were using a batch size of 4. Higher batch sizes hurt the accuracy of the model.
