@@ -678,9 +678,9 @@ class DataReader:
         else:  # VCF
             self.ref_sample_value_index += 8
 
-        self.ref_is_hap = not ("|" in self.reference_panel.iloc[0, self.ref_sample_value_index] or "/" in
-                               self.reference_panel.iloc[0, self.ref_sample_value_index])
-        self.ref_is_phased = "|" in self.reference_panel.iloc[0, self.ref_sample_value_index]
+        self.ref_is_hap = not ("|" in self.reference_panel.iloc[0, self.ref_sample_value_index-1] or "/" in
+                               self.reference_panel.iloc[0, self.ref_sample_value_index-1])
+        self.ref_is_phased = "|" in self.reference_panel.iloc[0, self.ref_sample_value_index-1]
         ## For now I won't support merging haploids into unphased data
         if self.ref_is_hap and not target_is_gonna_be_phased_or_haps:
             raise ValueError(
@@ -779,9 +779,9 @@ class DataReader:
         else:  # VCF
             self.target_sample_value_index += 8
 
-        self.target_is_hap = not ("|" in test_df.iloc[0, self.target_sample_value_index] or "/" in test_df.iloc[
-            0, self.target_sample_value_index])
-        is_phased = "|" in test_df.iloc[0, self.target_sample_value_index]
+        self.target_is_hap = not ("|" in test_df.iloc[0, self.target_sample_value_index-1] or "/" in test_df.iloc[
+            0, self.target_sample_value_index-1])
+        is_phased = "|" in test_df.iloc[0, self.target_sample_value_index-1]
         test_var_count = test_df.shape[0]
         pprint(f"{test_var_count} {'haplotype' if self.target_is_hap else 'diplotype'} variants found!")
         if (self.target_is_hap or is_phased) and not (self.ref_is_phased or self.ref_is_hap):
