@@ -880,7 +880,7 @@ class DataReader:
         return np.array(genotypes)
 
     def __convert_hap_probs_to_hap_genotypes(self, allele_probs) -> np.ndarray:
-        return np.argmax(allele_probs, axis=1).astype(str)
+        return np.argmax(allele_probs, axis=-1).astype(str)
 
     def __convert_unphased_probs_to_genotypes(self, allele_probs) -> np.ndarray:
         n_samples, n_variants, n_alleles = allele_probs.shape
