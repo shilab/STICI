@@ -130,16 +130,14 @@ Prof. Xinghua Shi: mindyshi[at]temple[dot]edu
 If you use our model in any project or publication, please cite our paper [Split-Transformer Impute (STI): Genotype Imputation Using a Transformer-Based Model](https://www.biorxiv.org/content/10.1101/2023.03.05.531190v1.abstract)
 
 ```
-@article {Mowlaei2023.03.05.531190,
-	author = {Mowlaei, Mohammad Erfan and Li, Chong and Chen, Junjie and Jamialahmadi, Benyamin and Kumar, Sudhir and Rebbeck, Timothy Richard and Shi, Xinghua},
-	title = {Split-Transformer Impute (STI): Genotype Imputation Using a Transformer-Based Model},
-	elocation-id = {2023.03.05.531190},
-	year = {2023},
-	doi = {10.1101/2023.03.05.531190},
-	publisher = {Cold Spring Harbor Laboratory},
-	abstract = {With recent advances in DNA sequencing technologies, researchers are able to acquire increasingly larger volumes of genomic datasets, enabling the training of powerful models for downstream genomic tasks. However, genome scale dataset often contain many missing values, decreasing the accuracy and power in drawing robust conclusions drawn in genomic analysis. Consequently, imputation of missing information by statistical and machine learning methods has become important. We show that the current state-of-the-art can be advanced significantly by applying a novel variation of the Transformer architecture, called Split-Transformer Impute (STI), coupled with improved preprocessing of data input into deep learning models. We performed extensive experiments to benchmark STI against existing methods using resequencing datasets from human 1000 Genomes Project and yeast genomes. Results establish superior performance of our new methods compared to competing genotype imputation methods in terms of accuracy and imputation quality score in the benchmark datasets.Competing Interest StatementThe authors have declared no competing interest.},
-	URL = {https://www.biorxiv.org/content/early/2023/03/06/2023.03.05.531190},
-	eprint = {https://www.biorxiv.org/content/early/2023/03/06/2023.03.05.531190.full.pdf},
-	journal = {bioRxiv}
+@article{mowlaei2025stici,
+  title={STICI: Split-Transformer with integrated convolutions for genotype imputation},
+  author={Mowlaei, Mohammad Erfan and Li, Chong and Jamialahmadi, Oveis and Dias, Raquel and Chen, Junjie and Jamialahmadi, Benyamin and Rebbeck, Timothy Richard and Carnevale, Vincenzo and Kumar, Sudhir and Shi, Xinghua},
+  journal={Nature Communications},
+  volume={16},
+  number={1},
+  pages={1218},
+  year={2025},
+  publisher={Nature Publishing Group UK London}
 }
 ```
